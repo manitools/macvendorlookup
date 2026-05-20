@@ -112,8 +112,8 @@
 <div class="container">
     <h1>Bulk MAC Address Vendor Lookup 📡</h1>
     <p style="color: #586069; font-size: 14px; margin-bottom: 20px;">
-        Paste MAC addresses below (one per line). Supports standard formats.<br>
-        <em>Note: Lookups are throttled to 1 request per second to comply with free API rate limits.</em>
+        Paste MAC addresses below (one per line). Built-in CORS bypass uses a 3-tier API fallback to ensure reliability.<br>
+        <em>Note: Lookups are throttled slightly to respect free API limits.</em>
     </p>
 
     <textarea id="macInput" placeholder="00:00:5e:00:53:01&#10;FC-A1-3E-2A-1C-33&#10;005056C00008"></textarea>
@@ -158,27 +158,41 @@
         return 'Invalid';
     }
 
+    // 3-Tier API Fallback to guarantee CORS success
     async function fetchVendor(mac) {
+        const cleanMac = encodeURIComponent(mac);
+
+        // API 1: maclookup.app (Natively supports CORS)
         try {
-            // Fix CORS by routing through a free proxy
-            const targetUrl = `https://api.macvendors.com/${encodeURIComponent(mac)}`;
-            const proxyUrl = `https://api.allorigins.win/raw?url=${encodeURIComponent(targetUrl)}`;
-            
-            const response = await fetch(proxyUrl);
-            const text = await response.text();
-            
-            if (response.status === 200 && !text.includes('Not Found')) {
-                return text;
-            } else if (response.status === 404 || text.includes('Not Found')) {
-                return 'Unknown / Not Found';
-            } else if (response.status === 429) {
-                return 'Rate Limited (Too Fast)';
-            } else {
-                return 'API Error';
+            const res1 = await fetch(`https://api.maclookup.app/v2/macs/${cleanMac}`);
+            if (res1.ok) {
+                const data = await res1.json();
+                if (data.success && data.found) return data.company;
+                if (data.success && !data.found) return 'Unknown / Not Found';
             }
-        } catch (error) {
-            return 'Network/CORS Error';
+        } catch (e) { /* Fall through to next API */ }
+
+        // API 2: macvendors.co (Natively supports CORS)
+        try {
+            const res2 = await fetch(`https://macvendors.co/api/${cleanMac}`);
+            if (res2.ok) {
+                const data = await res2.json();
+                if (data.result && data.result.company) return data.result.company;
+            }
+        } catch (e) { /* Fall through to next API */ }
+
+        // API 3: macvendors.com via secure public proxy (Last resort)
+        try {
+            const res3 = await fetch(`https://corsproxy.io/?https://api.macvendors.com/${cleanMac}`);
+            if (res3.ok) {
+                const text = await res3.text();
+                if (!text.includes('Not Found')) return text;
+            }
+        } catch (e) {
+            return 'Network/CORS Error (All APIs Blocked)';
         }
+
+        return 'Unknown / Not Found';
     }
 
     function clearData() {
@@ -221,8 +235,8 @@
 
             if (oui !== 'Invalid') {
                 vendor = await fetchVendor(originalMac);
-                // Wait 1 second between lookups so the API doesn't block us
-                if (i < macs.length - 1) await sleep(1000); 
+                // Pause slightly to be polite to the free APIs
+                if (i < macs.length - 1) await sleep(800); 
             }
 
             const resultObj = { 
@@ -232,11 +246,13 @@
             };
             globalResults.push(resultObj);
 
+            // Determine formatting class
             let vendorClass = '';
             if (vendor.includes('Unknown') || vendor.includes('Invalid')) vendorClass = 'vendor-unknown';
-            else if (vendor.includes('Error') || vendor.includes('Rate')) vendorClass = 'vendor-error';
+            else if (vendor.includes('Error') || vendor.includes('Blocked')) vendorClass = 'vendor-error';
             else vendorClass = 'vendor-found';
 
+            // Inject row
             const tr = document.createElement('tr');
             tr.innerHTML = `
                 <td style="color:#586069;">${i + 1}</td>
@@ -246,6 +262,7 @@
             `;
             tbody.appendChild(tr);
             
+            // Auto-scroll table
             const tableContainer = document.getElementById('tableContainer');
             tableContainer.scrollTop = tableContainer.scrollHeight;
         }
@@ -253,7 +270,7 @@
         statusBox.innerText = `✅ Complete! Processed ${macs.length} MAC addresses.`;
         document.getElementById('btnLookup').disabled = false;
         
-        // Enable export buttons now that data is ready!
+        // Enable exports
         document.getElementById('btnExportCSV').disabled = false;
         document.getElementById('btnExportJSON').disabled = false;
     }
@@ -269,7 +286,7 @@
             extension = 'json';
         } else if (format === 'csv') {
             const headers = ['Original MAC', 'OUI', 'Vendor'];
-            // Create CSV text
+            // Create proper CSV formatting (handles commas in vendor names)
             const rows = globalResults.map(row => {
                 return headers.map(fieldName => `"${String(row[fieldName]).replace(/"/g, '""')}"`).join(',');
             });
@@ -278,7 +295,7 @@
             extension = 'csv';
         }
 
-        // Trigger the file download
+        // Trigger safe file download
         const blob = new Blob([dataStr], { type: mimeType });
         const url = URL.createObjectURL(blob);
         const a = document.createElement('a');

@@ -111,4 +111,185 @@
 
 <div class="container">
     <h1>Bulk MAC Address Vendor Lookup 📡</h1>
-    <p style="color: #5
+    <p style="color: #586069; font-size: 14px; margin-bottom: 20px;">
+        Paste MAC addresses below (one per line). Supports standard formats.<br>
+        <em>Note: Lookups are throttled to 1 request per second to comply with free API rate limits.</em>
+    </p>
+
+    <textarea id="macInput" placeholder="00:00:5e:00:53:01&#10;FC-A1-3E-2A-1C-33&#10;005056C00008"></textarea>
+
+    <div class="controls">
+        <button id="btnLookup" onclick="startLookup()">Start Bulk Lookup</button>
+        <button id="btnClear" class="btn-clear" onclick="clearData()">Clear</button>
+        <button id="btnExportCSV" class="btn-export" onclick="exportData('csv')" disabled>Export CSV</button>
+        <button id="btnExportJSON" class="btn-export" onclick="exportData('json')" disabled>Export JSON</button>
+    </div>
+
+    <div id="status" class="status"></div>
+
+    <div class="table-container" id="tableContainer" style="display:none;">
+        <table id="resultsTable">
+            <thead>
+                <tr>
+                    <th>#</th>
+                    <th>MAC Address</th>
+                    <th>OUI / Prefix</th>
+                    <th>Vendor / Manufacturer</th>
+                </tr>
+            </thead>
+            <tbody>
+                </tbody>
+        </table>
+    </div>
+</div>
+
+<script>
+    let globalResults = [];
+
+    // Helper to sleep and avoid API rate limits
+    const sleep = ms => new Promise(r => setTimeout(r, ms));
+
+    // Normalize MAC to extract just the OUI (first 6 characters)
+    function getOUI(mac) {
+        const clean = mac.replace(/[^a-fA-F0-9]/g, '');
+        if (clean.length >= 6) {
+            return clean.substring(0, 6).toUpperCase().match(/.{1,2}/g).join(':');
+        }
+        return 'Invalid';
+    }
+
+    async function fetchVendor(mac) {
+        try {
+            // Fix CORS by routing through a free proxy
+            const targetUrl = `https://api.macvendors.com/${encodeURIComponent(mac)}`;
+            const proxyUrl = `https://api.allorigins.win/raw?url=${encodeURIComponent(targetUrl)}`;
+            
+            const response = await fetch(proxyUrl);
+            const text = await response.text();
+            
+            if (response.status === 200 && !text.includes('Not Found')) {
+                return text;
+            } else if (response.status === 404 || text.includes('Not Found')) {
+                return 'Unknown / Not Found';
+            } else if (response.status === 429) {
+                return 'Rate Limited (Too Fast)';
+            } else {
+                return 'API Error';
+            }
+        } catch (error) {
+            return 'Network/CORS Error';
+        }
+    }
+
+    function clearData() {
+        document.getElementById('macInput').value = '';
+        document.querySelector('#resultsTable tbody').innerHTML = '';
+        document.getElementById('tableContainer').style.display = 'none';
+        document.getElementById('status').style.display = 'none';
+        document.getElementById('btnExportCSV').disabled = true;
+        document.getElementById('btnExportJSON').disabled = true;
+        globalResults = [];
+    }
+
+    async function startLookup() {
+        const input = document.getElementById('macInput').value;
+        const macs = input.split('\n').map(m => m.trim()).filter(m => m.length > 0);
+        
+        if (macs.length === 0) {
+            alert("Please enter at least one MAC address.");
+            return;
+        }
+
+        // Reset UI
+        globalResults = [];
+        const tbody = document.querySelector('#resultsTable tbody');
+        tbody.innerHTML = '';
+        document.getElementById('tableContainer').style.display = 'block';
+        document.getElementById('btnExportCSV').disabled = true;
+        document.getElementById('btnExportJSON').disabled = true;
+        document.getElementById('btnLookup').disabled = true;
+
+        const statusBox = document.getElementById('status');
+        statusBox.style.display = 'block';
+
+        for (let i = 0; i < macs.length; i++) {
+            statusBox.innerText = `⏳ Processing ${i + 1} of ${macs.length}: ${macs[i]}...`;
+            
+            const originalMac = macs[i];
+            const oui = getOUI(originalMac);
+            let vendor = 'Invalid MAC Format';
+
+            if (oui !== 'Invalid') {
+                vendor = await fetchVendor(originalMac);
+                // Wait 1 second between lookups so the API doesn't block us
+                if (i < macs.length - 1) await sleep(1000); 
+            }
+
+            const resultObj = { 
+                "Original MAC": originalMac, 
+                "OUI": oui, 
+                "Vendor": vendor 
+            };
+            globalResults.push(resultObj);
+
+            let vendorClass = '';
+            if (vendor.includes('Unknown') || vendor.includes('Invalid')) vendorClass = 'vendor-unknown';
+            else if (vendor.includes('Error') || vendor.includes('Rate')) vendorClass = 'vendor-error';
+            else vendorClass = 'vendor-found';
+
+            const tr = document.createElement('tr');
+            tr.innerHTML = `
+                <td style="color:#586069;">${i + 1}</td>
+                <td><strong>${originalMac}</strong></td>
+                <td><code>${oui}</code></td>
+                <td class="${vendorClass}">${vendor}</td>
+            `;
+            tbody.appendChild(tr);
+            
+            const tableContainer = document.getElementById('tableContainer');
+            tableContainer.scrollTop = tableContainer.scrollHeight;
+        }
+
+        statusBox.innerText = `✅ Complete! Processed ${macs.length} MAC addresses.`;
+        document.getElementById('btnLookup').disabled = false;
+        
+        // Enable export buttons now that data is ready!
+        document.getElementById('btnExportCSV').disabled = false;
+        document.getElementById('btnExportJSON').disabled = false;
+    }
+
+    function exportData(format) {
+        if (globalResults.length === 0) return;
+
+        let dataStr, mimeType, extension;
+
+        if (format === 'json') {
+            dataStr = JSON.stringify(globalResults, null, 2);
+            mimeType = 'application/json';
+            extension = 'json';
+        } else if (format === 'csv') {
+            const headers = ['Original MAC', 'OUI', 'Vendor'];
+            // Create CSV text
+            const rows = globalResults.map(row => {
+                return headers.map(fieldName => `"${String(row[fieldName]).replace(/"/g, '""')}"`).join(',');
+            });
+            dataStr = headers.join(',') + '\n' + rows.join('\n');
+            mimeType = 'text/csv';
+            extension = 'csv';
+        }
+
+        // Trigger the file download
+        const blob = new Blob([dataStr], { type: mimeType });
+        const url = URL.createObjectURL(blob);
+        const a = document.createElement('a');
+        a.href = url;
+        a.download = `mac-vendors-export.${extension}`;
+        document.body.appendChild(a);
+        a.click();
+        document.body.removeChild(a);
+        URL.revokeObjectURL(url);
+    }
+</script>
+
+</body>
+</html>
